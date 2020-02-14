@@ -9,5 +9,6 @@ git submodule add https://github.com/AdamIsrael/charms.osm mod/charms.osm
 
 
 ```bash
-ln -s ../mod/charms.osm/charms lib/charms
+mkdir -p lib/charms
+ln -s ../mod/charms.osm/charms/osm lib/charms/osm
 ```

@@ -65,7 +65,7 @@ class SSHProxy:
     def get_ssh_public_key():
         publickey = ""
         if os.path.exists(SSHProxy.private_key_path):
-            with open(publickey_path, "r") as f:
+            with open(SSHProxy.public_key_path, "r") as f:
                 publickey = f.read()
         return publickey
 
