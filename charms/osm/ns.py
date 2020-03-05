@@ -14,6 +14,14 @@ import yaml
 try:
     import juju
 except ImportError:
+    # Not all cloud images are created equal
+    if not os.path.exists("/usr/bin/python3") or not os.path.exists("/usr/bin/pip3"):
+        # Update the apt cache
+        subprocess.check_call(["apt-get", "update"])
+
+        # Install the Python3 package
+        subprocess.check_call(["apt-get", "install", "-y", "python3", "python3-pip"],)
+
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "juju"],
     )
