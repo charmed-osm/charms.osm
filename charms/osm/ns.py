@@ -22,6 +22,10 @@ except ImportError:
         # Install the Python3 package
         subprocess.check_call(["apt-get", "install", "-y", "python3", "python3-pip"],)
 
+
+    # Install the libjuju build dependencies
+    subprocess.check_call(["apt-get", "install", "-y", "libffi-dev", "libssl-dev"],)
+
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "juju"],
     )
