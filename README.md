@@ -4,7 +4,7 @@ A Python library to aid the development of charms for Open Source Mano (OSM)
 ## Usage
 
 ```bash
-git submodule add https://github.com/AdamIsrael/charms.osm mod/charms.osm
+git submodule add https://github.com/charmed-osm/charms.osm mod/charms.osm
 ```
 
 
