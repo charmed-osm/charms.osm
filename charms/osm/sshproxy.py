@@ -47,17 +47,25 @@ class SSHProxy:
         self.password = password
 
     @staticmethod
-    def generate_ssh_key():
+    def generate_ssh_key(public=None, private=None):
         """Generate a 4096-bit rsa keypair."""
         if not os.path.exists(SSHProxy.private_key_path):
-            cmd = "ssh-keygen -t {} -b {} -N '' -f {}".format(
-                SSHProxy.key_type, SSHProxy.key_bits, SSHProxy.private_key_path,
-            )
+            if public and private:
+                with open(SSHProxy.public_key_path, "w") as f:
+                    f.write(public)
+                    f.close()
+                with open(SSHProxy.private_key_path, "w") as f:
+                    f.write(private)
+                    f.close()
+            else:
+                cmd = "ssh-keygen -t {} -b {} -N '' -f {}".format(
+                    SSHProxy.key_type, SSHProxy.key_bits, SSHProxy.private_key_path,
+                )
 
-            try:
-                check_call(cmd, shell=True)
-            except CalledProcessError:
-                return False
+                try:
+                    check_call(cmd, shell=True)
+                except CalledProcessError:
+                    return False
 
         return True
 
@@ -70,11 +78,16 @@ class SSHProxy:
         return publickey
 
     @staticmethod
-    def has_ssh_key():
+    def get_ssh_private_key():
+        privatekey = ""
         if os.path.exists(SSHProxy.private_key_path):
-            return True
-        else:
-            return False
+            with open(SSHProxy.private_key_path, "r") as f:
+                privatekey = f.read()
+        return privatekey
+
+    @staticmethod
+    def has_ssh_key():
+        return True if os.path.exists(SSHProxy.private_key_path) else False
 
     def run(self, cmd: str) -> (str, str):
         """Run a command remotely via SSH.
@@ -173,8 +186,8 @@ class SSHProxy:
                 port=22,
                 username=self.username,
                 password=self.password,
-                pkey=pkey
-        )
+                pkey=pkey,
+            )
         except paramiko.ssh_exception.SSHException as e:
             if "Error reading SSH protocol banner" == str(e):
                 # Once more, with feeling
