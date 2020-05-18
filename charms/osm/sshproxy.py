@@ -47,27 +47,29 @@ class SSHProxy:
         self.password = password
 
     @staticmethod
-    def generate_ssh_key(public=None, private=None):
+    def generate_ssh_key():
         """Generate a 4096-bit rsa keypair."""
         if not os.path.exists(SSHProxy.private_key_path):
-            if public and private:
-                with open(SSHProxy.public_key_path, "w") as f:
-                    f.write(public)
-                    f.close()
-                with open(SSHProxy.private_key_path, "w") as f:
-                    f.write(private)
-                    f.close()
-            else:
-                cmd = "ssh-keygen -t {} -b {} -N '' -f {}".format(
-                    SSHProxy.key_type, SSHProxy.key_bits, SSHProxy.private_key_path,
-                )
+            cmd = "ssh-keygen -t {} -b {} -N '' -f {}".format(
+                SSHProxy.key_type, SSHProxy.key_bits, SSHProxy.private_key_path,
+            )
 
-                try:
-                    check_call(cmd, shell=True)
-                except CalledProcessError:
-                    return False
+            try:
+                check_call(cmd, shell=True)
+            except CalledProcessError:
+                return False
 
         return True
+
+    @staticmethod
+    def write_ssh_keys(public, private):
+        """Write a 4096-bit rsa keypair."""
+        with open(SSHProxy.public_key_path, "w") as f:
+            f.write(public)
+            f.close()
+        with open(SSHProxy.private_key_path, "w") as f:
+            f.write(private)
+            f.close()
 
     @staticmethod
     def get_ssh_public_key():
@@ -115,7 +117,7 @@ class SSHProxy:
 
         # Create an sftp connection from the underlying transport
         sftp = paramiko.SFTPClient.from_transport(client.get_transport())
-        sftp.put(local_file, remote_file)
+        sftp.put(local, remote)
         client.close()
         pass
 
