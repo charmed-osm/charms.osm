@@ -21,11 +21,12 @@
 
 import io
 import ipaddress
-import paramiko
+
 import os
 import socket
 import shlex
 import traceback
+import sys
 
 from subprocess import (
     check_call,
@@ -34,6 +35,30 @@ from subprocess import (
     PIPE,
 )
 
+def install_dependencies():
+    # Make sure Python3 + PIP are available
+    if not os.path.exists("/usr/bin/python3") or not os.path.exists("/usr/bin/pip3"):
+        # This is needed when running as a k8s charm, as the ubuntu:latest
+        # image doesn't include either package.
+
+        # Update the apt cache
+        check_call(["apt-get", "update"])
+
+        # Install the Python3 package
+        check_call(["apt-get", "install", "-y", "python3", "python3-pip"],)
+
+    # Install the build dependencies for our requirements (paramiko)
+    check_call(["apt-get", "install", "-y", "libffi-dev", "libssl-dev"],)
+
+    check_call(
+        [sys.executable, "-m", "pip", "install", "paramiko"],
+    )
+
+try:
+    import paramiko
+except Exception as ex:
+    install_dependencies()
+    import paramiko
 
 class SSHProxy:
     private_key_path = "/root/.ssh/id_sshproxy"
