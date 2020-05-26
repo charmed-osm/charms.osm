@@ -161,7 +161,7 @@ class SSHProxy:
                 e.expected_key, e.got_key,
             )
         except (TimeoutError, socket.timeout):
-            stderr = "Timeout attempting to reach {}".format(cfg["ssh-hostname"])
+            stderr = "Timeout attempting to reach {}".format(self._get_hostname())
         except Exception as error:
             tb = traceback.format_exc()
             stderr = "Unhandled exception: {}".format(tb)
