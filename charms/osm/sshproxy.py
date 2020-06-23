@@ -21,7 +21,7 @@
 
 import io
 import ipaddress
-
+import subprocess
 import os
 import socket
 import shlex
@@ -35,30 +35,6 @@ from subprocess import (
     PIPE,
 )
 
-def install_dependencies():
-    # Make sure Python3 + PIP are available
-    if not os.path.exists("/usr/bin/python3") or not os.path.exists("/usr/bin/pip3"):
-        # This is needed when running as a k8s charm, as the ubuntu:latest
-        # image doesn't include either package.
-
-        # Update the apt cache
-        check_call(["apt-get", "update"])
-
-        # Install the Python3 package
-        check_call(["apt-get", "install", "-y", "python3", "python3-pip"],)
-
-    # Install the build dependencies for our requirements (paramiko)
-    check_call(["apt-get", "install", "-y", "libffi-dev", "libssl-dev"],)
-
-    check_call(
-        [sys.executable, "-m", "pip", "install", "paramiko"],
-    )
-
-try:
-    import paramiko
-except Exception as ex:
-    install_dependencies()
-    import paramiko
 
 class SSHProxy:
     private_key_path = "/root/.ssh/id_sshproxy"
@@ -70,6 +46,10 @@ class SSHProxy:
         self.hostname = hostname
         self.username = username
         self.password = password
+
+    @staticmethod
+    def install():
+        check_call("apt update && apt install -y openssh-client", shell=True)
 
     @staticmethod
     def generate_ssh_key():
@@ -133,18 +113,52 @@ class SSHProxy:
 
         # Make sure we have everything we need to connect
         if host and user:
-            return self._ssh(cmd)
+            return self.ssh(cmd)
 
         raise Exception("Invalid SSH credentials.")
 
-    def sftp(self, local, remote):
-        client = self._get_ssh_client()
+    def scp(self, source_file, destination_file):
+        """Execute an scp command. Requires a fully qualified source and
+        destination.
 
-        # Create an sftp connection from the underlying transport
-        sftp = paramiko.SFTPClient.from_transport(client.get_transport())
-        sftp.put(local, remote)
-        client.close()
-        pass
+        :param str source_file: Path to the source file
+        :param str destination_file: Path to the destination file
+        """
+        cmd = [
+            "scp",
+            "-i",
+            os.path.expanduser(self.private_key_path),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-q",
+            "-B",
+        ]
+        destination = "{}@{}:{}".format(self.user, self.host, destination_file)
+        cmd.extend([source_file, destination])
+        check_call(cmd)
+
+    def ssh(self, command):
+        """Run a command remotely via SSH.
+
+        :param str command: The command to execute
+        :return: tuple: The stdout and stderr of the command execution
+        :raises: :class:`CalledProcessError` if the command fails
+        """
+
+        destination = "{}@{}".format(self.user, self.host)
+        cmd = [
+            "ssh",
+            "-i",
+            os.path.expanduser(self.private_key_path),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-q",
+            destination,
+        ]
+        cmd.extend([command])
+        p = Popen(cmd, stdout=PIPE, stderr=PIPE)
+        stdout, stderr = p.communicate()
+        return (stdout.decode("utf-8").strip(), stderr.decode("utf-8").strip())
 
     def verify_credentials(self):
         """Verify the SSH credentials.
@@ -155,14 +169,6 @@ class SSHProxy:
             (stdout, stderr) = self.run("hostname")
         except CalledProcessError as e:
             stderr = "Command failed: {} ({})".format(" ".join(e.cmd), str(e.output))
-        except paramiko.ssh_exception.AuthenticationException as e:
-            stderr = "{}.".format(e)
-        except paramiko.ssh_exception.BadAuthenticationType as e:
-            stderr = "{}".format(e.explanation)
-        except paramiko.ssh_exception.BadHostKeyException as e:
-            stderr = "Host key mismatch: expected {} but got {}.".format(
-                e.expected_key, e.got_key,
-            )
         except (TimeoutError, socket.timeout):
             stderr = "Timeout attempting to reach {}".format(self._get_hostname())
         except Exception as error:
@@ -185,66 +191,3 @@ class SSHProxy:
         instance.
         """
         return self.hostname.split(";")[0]
-
-    def _get_ssh_client(self):
-        """Return a connected Paramiko ssh object."""
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        pkey = None
-
-        # Otherwise, check for the auto-generated private key
-        if os.path.exists(self.private_key_path):
-            with open(self.private_key_path) as f:
-                pkey = paramiko.RSAKey.from_private_key(f)
-
-        ###########################################################################
-        # There is a bug in some versions of OpenSSH 4.3 (CentOS/RHEL 5) where    #
-        # the server may not send the SSH_MSG_USERAUTH_BANNER message except when #
-        # responding to an auth_none request. For example, paramiko will attempt  #
-        # to use password authentication when a password is set, but the server   #
-        # could deny that, instead requesting keyboard-interactive. The hack to   #
-        # workaround this is to attempt a reconnect, which will receive the right #
-        # banner, and authentication can proceed. See the following for more info #
-        # https://github.com/paramiko/paramiko/issues/432                         #
-        # https://github.com/paramiko/paramiko/pull/438                           #
-        ###########################################################################
-
-        try:
-            client.connect(
-                self.hostname,
-                port=22,
-                username=self.username,
-                password=self.password,
-                pkey=pkey,
-            )
-        except paramiko.ssh_exception.SSHException as e:
-            if "Error reading SSH protocol banner" == str(e):
-                # Once more, with feeling
-                client.connect(
-                    host, port=22, username=user, password=password, pkey=pkey
-                )
-            else:
-                # Reraise the original exception
-                raise e
-
-        return client
-
-    def _ssh(self, cmd):
-        """Run an arbitrary command over SSH.
-
-        Returns a tuple of (stdout, stderr)
-        """
-        client = self._get_ssh_client()
-
-        cmds = " ".join(cmd)
-        stdin, stdout, stderr = client.exec_command(cmds, get_pty=True)
-        retcode = stdout.channel.recv_exit_status()
-        client.close()  # @TODO re-use connections
-        if retcode > 0:
-            output = stderr.read().strip()
-            raise CalledProcessError(returncode=retcode, cmd=cmd, output=output)
-        return (
-            stdout.read().decode("utf-8").strip(),
-            stderr.read().decode("utf-8").strip(),
-        )
