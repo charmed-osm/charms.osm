@@ -21,7 +21,7 @@
 
 import io
 import ipaddress
-
+import subprocess
 import os
 import socket
 import shlex
@@ -35,30 +35,178 @@ from subprocess import (
     PIPE,
 )
 
-def install_dependencies():
-    # Make sure Python3 + PIP are available
-    if not os.path.exists("/usr/bin/python3") or not os.path.exists("/usr/bin/pip3"):
-        # This is needed when running as a k8s charm, as the ubuntu:latest
-        # image doesn't include either package.
+from ops.charm import CharmBase, CharmEvents
+from ops.framework import StoredState, EventBase, EventSource
+from ops.main import main
+from ops.model import (
+    ActiveStatus,
+    BlockedStatus,
+    MaintenanceStatus,
+    WaitingStatus,
+    ModelError,
+)
+import os
+import subprocess
+from .proxy_cluster import ProxyCluster
 
-        # Update the apt cache
-        check_call(["apt-get", "update"])
+import logging
 
-        # Install the Python3 package
-        check_call(["apt-get", "install", "-y", "python3", "python3-pip"],)
 
-    # Install the build dependencies for our requirements (paramiko)
-    check_call(["apt-get", "install", "-y", "libffi-dev", "libssl-dev"],)
+logger = logging.getLogger(__name__)
 
-    check_call(
-        [sys.executable, "-m", "pip", "install", "paramiko"],
-    )
+class SSHKeysInitialized(EventBase):
+    def __init__(self, handle, ssh_public_key, ssh_private_key):
+        super().__init__(handle)
+        self.ssh_public_key = ssh_public_key
+        self.ssh_private_key = ssh_private_key
 
-try:
-    import paramiko
-except Exception as ex:
-    install_dependencies()
-    import paramiko
+    def snapshot(self):
+        return {
+            "ssh_public_key": self.ssh_public_key,
+            "ssh_private_key": self.ssh_private_key,
+        }
+
+    def restore(self, snapshot):
+        self.ssh_public_key = snapshot["ssh_public_key"]
+        self.ssh_private_key = snapshot["ssh_private_key"]
+
+
+class ProxyClusterEvents(CharmEvents):
+    ssh_keys_initialized = EventSource(SSHKeysInitialized)
+
+
+class SSHProxyCharm(CharmBase):
+
+    state = StoredState()
+    on = ProxyClusterEvents()
+
+    def __init__(self, framework, key):
+        super().__init__(framework, key)
+
+        self.peers = ProxyCluster(self, "proxypeer")
+
+        # SSH Proxy actions (primitives)
+        self.framework.observe(self.on.generate_ssh_key_action, self.on_generate_ssh_key_action)
+        self.framework.observe(self.on.get_ssh_public_key_action, self.on_get_ssh_public_key_action)
+        self.framework.observe(self.on.run_action, self.on_run_action)
+        self.framework.observe(self.on.verify_ssh_credentials_action, self.on_verify_ssh_credentials_action)
+
+        self.framework.observe(self.on.proxypeer_relation_changed, self.on_proxypeer_relation_changed)
+
+    def get_ssh_proxy(self):
+        """Get the SSHProxy instance"""
+        proxy = SSHProxy(
+            hostname=self.model.config["ssh-hostname"],
+            username=self.model.config["ssh-username"],
+            password=self.model.config["ssh-password"],
+        )
+        return proxy
+
+    def on_proxypeer_relation_changed(self, event):
+        if self.peers.is_cluster_initialized and not SSHProxy.has_ssh_key():
+            pubkey = self.peers.ssh_public_key
+            privkey = self.peers.ssh_private_key
+            SSHProxy.write_ssh_keys(public=pubkey, private=privkey)
+            self.verify_credentials()
+        else:
+            event.defer()
+
+    def on_config_changed(self, event):
+        """Handle changes in configuration"""
+        self.verify_credentials()
+
+    def on_install(self, event):
+        SSHProxy.install()
+
+    def on_start(self, event):
+        """Called when the charm is being installed"""
+        if not self.peers.is_joined:
+            event.defer()
+            return
+
+        unit = self.model.unit
+
+        if not SSHProxy.has_ssh_key():
+            unit.status = MaintenanceStatus("Generating SSH keys...")
+            pubkey = None
+            privkey = None
+            if self.model.unit.is_leader():
+                if self.peers.is_cluster_initialized:
+                    SSHProxy.write_ssh_keys(
+                        public=self.peers.ssh_public_key,
+                        private=self.peers.ssh_private_key,
+                    )
+                else:
+                    SSHProxy.generate_ssh_key()
+                    self.on.ssh_keys_initialized.emit(
+                        SSHProxy.get_ssh_public_key(), SSHProxy.get_ssh_private_key()
+                    )
+        self.verify_credentials()
+
+    def verify_credentials(self):
+        unit = self.model.unit
+
+        # Unit should go into a waiting state until verify_ssh_credentials is successful
+        unit.status = WaitingStatus("Waiting for SSH credentials")
+        proxy = self.get_ssh_proxy()
+        verified, _ = proxy.verify_credentials()
+        if verified:
+            unit.status = ActiveStatus()
+        else:
+            unit.status = BlockedStatus("Invalid SSH credentials.")
+        return verified
+
+    #####################
+    # SSH Proxy methods #
+    #####################
+    def on_generate_ssh_key_action(self, event):
+        """Generate a new SSH keypair for this unit."""
+        if self.model.unit.is_leader():
+            if not SSHProxy.generate_ssh_key():
+                event.fail("Unable to generate ssh key")
+        else:
+            event.fail("Unit is not leader")
+            return
+
+    def on_get_ssh_public_key_action(self, event):
+        """Get the SSH public key for this unit."""
+        if self.model.unit.is_leader():
+            pubkey = SSHProxy.get_ssh_public_key()
+            event.set_results({"pubkey": SSHProxy.get_ssh_public_key()})
+        else:
+            event.fail("Unit is not leader")
+            return
+
+    def on_run_action(self, event):
+        """Run an arbitrary command on the remote host."""
+        if self.model.unit.is_leader():
+            cmd = event.params["command"]
+            proxy = self.get_ssh_proxy()
+            stdout, stderr = proxy.run(cmd)
+            event.set_results({"output": stdout})
+            if len(stderr):
+                event.fail(stderr)
+        else:
+            event.fail("Unit is not leader")
+            return
+
+    def on_verify_ssh_credentials_action(self, event):
+        """Verify the SSH credentials for this unit."""
+        if self.model.unit.is_leader():
+            proxy = self.get_ssh_proxy()
+            verified, stderr = proxy.verify_credentials()
+            if verified:
+                event.set_results({"verified": True})
+            else:
+                event.set_results({"verified": False, "stderr": stderr})
+        else:
+            event.fail("Unit is not leader")
+            return
+
+
+class LeadershipError(ModelError):
+    def __init__(self):
+        super().__init__("not leader")
 
 class SSHProxy:
     private_key_path = "/root/.ssh/id_sshproxy"
@@ -70,6 +218,10 @@ class SSHProxy:
         self.hostname = hostname
         self.username = username
         self.password = password
+
+    @staticmethod
+    def install():
+        check_call("apt update && apt install -y openssh-client sshpass", shell=True)
 
     @staticmethod
     def generate_ssh_key():
@@ -133,45 +285,76 @@ class SSHProxy:
 
         # Make sure we have everything we need to connect
         if host and user:
-            return self._ssh(cmd)
+            return self.ssh(cmd)
 
         raise Exception("Invalid SSH credentials.")
 
-    def sftp(self, local, remote):
-        client = self._get_ssh_client()
+    def scp(self, source_file, destination_file):
+        """Execute an scp command. Requires a fully qualified source and
+        destination.
 
-        # Create an sftp connection from the underlying transport
-        sftp = paramiko.SFTPClient.from_transport(client.get_transport())
-        sftp.put(local, remote)
-        client.close()
-        pass
+        :param str source_file: Path to the source file
+        :param str destination_file: Path to the destination file
+        :raises: :class:`CalledProcessError` if the command fails
+        """
+        cmd = [
+            "sshpass",
+            "-p",
+            self.password,
+            "scp",
+            "-i",
+            os.path.expanduser(self.private_key_path),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-q",
+            "-B",
+        ]
+        destination = "{}@{}:{}".format(self.username, self.hostname, destination_file)
+        cmd.extend([source_file, destination])
+        subprocess.run(cmd, check=True)
+
+    def ssh(self, command):
+        """Run a command remotely via SSH.
+
+        :param list(str) command: The command to execute
+        :return: tuple: The stdout and stderr of the command execution
+        :raises: :class:`CalledProcessError` if the command fails
+        """
+
+        destination = "{}@{}".format(self.username, self.hostname)
+        cmd = [
+            "sshpass",
+            "-p",
+            self.password,
+            "ssh",
+            "-i",
+            os.path.expanduser(self.private_key_path),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-q",
+            destination,
+        ]
+        cmd.extend(command)
+        output = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return (output.stdout.decode("utf-8").strip(), output.stderr.decode("utf-8").strip())
 
     def verify_credentials(self):
         """Verify the SSH credentials.
         
         :return (bool, str): Verified, Stderr
         """
+        verified = False
         try:
             (stdout, stderr) = self.run("hostname")
+            verified = True
         except CalledProcessError as e:
             stderr = "Command failed: {} ({})".format(" ".join(e.cmd), str(e.output))
-        except paramiko.ssh_exception.AuthenticationException as e:
-            stderr = "{}.".format(e)
-        except paramiko.ssh_exception.BadAuthenticationType as e:
-            stderr = "{}".format(e.explanation)
-        except paramiko.ssh_exception.BadHostKeyException as e:
-            stderr = "Host key mismatch: expected {} but got {}.".format(
-                e.expected_key, e.got_key,
-            )
         except (TimeoutError, socket.timeout):
             stderr = "Timeout attempting to reach {}".format(self._get_hostname())
         except Exception as error:
             tb = traceback.format_exc()
             stderr = "Unhandled exception: {}".format(tb)
-
-        if len(stderr) == 0:
-            return True, stderr
-        return False, stderr
+        return verified, stderr
 
     ###################
     # Private methods #
@@ -185,66 +368,3 @@ class SSHProxy:
         instance.
         """
         return self.hostname.split(";")[0]
-
-    def _get_ssh_client(self):
-        """Return a connected Paramiko ssh object."""
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        pkey = None
-
-        # Otherwise, check for the auto-generated private key
-        if os.path.exists(self.private_key_path):
-            with open(self.private_key_path) as f:
-                pkey = paramiko.RSAKey.from_private_key(f)
-
-        ###########################################################################
-        # There is a bug in some versions of OpenSSH 4.3 (CentOS/RHEL 5) where    #
-        # the server may not send the SSH_MSG_USERAUTH_BANNER message except when #
-        # responding to an auth_none request. For example, paramiko will attempt  #
-        # to use password authentication when a password is set, but the server   #
-        # could deny that, instead requesting keyboard-interactive. The hack to   #
-        # workaround this is to attempt a reconnect, which will receive the right #
-        # banner, and authentication can proceed. See the following for more info #
-        # https://github.com/paramiko/paramiko/issues/432                         #
-        # https://github.com/paramiko/paramiko/pull/438                           #
-        ###########################################################################
-
-        try:
-            client.connect(
-                self.hostname,
-                port=22,
-                username=self.username,
-                password=self.password,
-                pkey=pkey,
-            )
-        except paramiko.ssh_exception.SSHException as e:
-            if "Error reading SSH protocol banner" == str(e):
-                # Once more, with feeling
-                client.connect(
-                    host, port=22, username=user, password=password, pkey=pkey
-                )
-            else:
-                # Reraise the original exception
-                raise e
-
-        return client
-
-    def _ssh(self, cmd):
-        """Run an arbitrary command over SSH.
-
-        Returns a tuple of (stdout, stderr)
-        """
-        client = self._get_ssh_client()
-
-        cmds = " ".join(cmd)
-        stdin, stdout, stderr = client.exec_command(cmds, get_pty=True)
-        retcode = stdout.channel.recv_exit_status()
-        client.close()  # @TODO re-use connections
-        if retcode > 0:
-            output = stderr.read().strip()
-            raise CalledProcessError(returncode=retcode, cmd=cmd, output=output)
-        return (
-            stdout.read().decode("utf-8").strip(),
-            stderr.read().decode("utf-8").strip(),
-        )
