@@ -199,6 +199,7 @@ class SSHProxyCharm(CharmBase):
                 event.set_results({"verified": True})
             else:
                 event.set_results({"verified": False, "stderr": stderr})
+                event.fail("Not verified")
         else:
             event.fail("Unit is not leader")
             return
