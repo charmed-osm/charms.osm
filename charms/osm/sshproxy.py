@@ -192,14 +192,18 @@ class SSHProxyCharm(CharmBase):
 
     def on_verify_ssh_credentials_action(self, event):
         """Verify the SSH credentials for this unit."""
-        if self.model.unit.is_leader():
+        unit = self.model.unit
+        if unit.is_leader():
             proxy = self.get_ssh_proxy()
             verified, stderr = proxy.verify_credentials()
             if verified:
                 event.set_results({"verified": True})
+                unit.status = ActiveStatus()
             else:
                 event.set_results({"verified": False, "stderr": stderr})
                 event.fail("Not verified")
+                unit.status = BlockedStatus("Invalid SSH credentials.")
+
         else:
             event.fail("Unit is not leader")
             return
