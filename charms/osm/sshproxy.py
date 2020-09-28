@@ -28,6 +28,7 @@ import shlex
 import traceback
 import sys
 
+from shutil import which
 from subprocess import (
     check_call,
     Popen,
@@ -124,13 +125,11 @@ class SSHProxyCharm(CharmBase):
             event.defer()
             return
 
-        unit = self.model.unit
-
         if not SSHProxy.has_ssh_key():
-            unit.status = MaintenanceStatus("Generating SSH keys...")
+            self.unit.status = MaintenanceStatus("Generating SSH keys...")
             pubkey = None
             privkey = None
-            if self.model.unit.is_leader():
+            if self.unit.is_leader():
                 if self.peers.is_cluster_initialized:
                     SSHProxy.write_ssh_keys(
                         public=self.peers.ssh_public_key,
@@ -144,16 +143,12 @@ class SSHProxyCharm(CharmBase):
         self.verify_credentials()
 
     def verify_credentials(self):
-        unit = self.model.unit
-
-        # Unit should go into a waiting state until verify_ssh_credentials is successful
-        unit.status = WaitingStatus("Waiting for SSH credentials")
         proxy = self.get_ssh_proxy()
         verified, _ = proxy.verify_credentials()
         if verified:
-            unit.status = ActiveStatus()
+            self.unit.status = ActiveStatus()
         else:
-            unit.status = BlockedStatus("Invalid SSH credentials.")
+            self.unit.status = BlockedStatus("Invalid SSH credentials.")
         return verified
 
     #####################
@@ -214,8 +209,11 @@ class LeadershipError(ModelError):
         super().__init__("not leader")
 
 class SSHProxy:
-    private_key_path = "/root/.ssh/id_sshproxy"
-    public_key_path = "/root/.ssh/id_sshproxy.pub"
+    # The key will be stored in /var/lib/juju/agents, because for k8s operators that's a
+    # persisten volume, which means that the keys will be there after reboot
+    keys_base_path = "/var/lib/juju/agents/.ssh"
+    private_key_path = "{}/id_sshproxy".format(keys_base_path)
+    public_key_path = "{}/id_sshproxy.pub".format(keys_base_path)
     key_type = "rsa"
     key_bits = 4096
 
@@ -231,6 +229,10 @@ class SSHProxy:
     @staticmethod
     def generate_ssh_key():
         """Generate a 4096-bit rsa keypair."""
+        if which("ssh-keygen") is None:
+            SSHProxy.install()
+        if not os.path.exists(SSHProxy.keys_base_path):
+            os.mkdir(SSHProxy.keys_base_path)
         if not os.path.exists(SSHProxy.private_key_path):
             cmd = "ssh-keygen -t {} -b {} -N '' -f {}".format(
                 SSHProxy.key_type, SSHProxy.key_bits, SSHProxy.private_key_path,
@@ -246,6 +248,8 @@ class SSHProxy:
     @staticmethod
     def write_ssh_keys(public, private):
         """Write a 4096-bit rsa keypair."""
+        if not os.path.exists(SSHProxy.keys_base_path):
+            os.mkdir(SSHProxy.keys_base_path)
         with open(SSHProxy.public_key_path, "w") as f:
             f.write(public)
             f.close()
@@ -302,6 +306,8 @@ class SSHProxy:
         :param str destination_file: Path to the destination file
         :raises: :class:`CalledProcessError` if the command fails
         """
+        if which("sshpass") is None:
+            SSHProxy.install()
         cmd = [
             "sshpass",
             "-p",
@@ -326,6 +332,8 @@ class SSHProxy:
         :raises: :class:`CalledProcessError` if the command fails
         """
 
+        if which("sshpass") is None:
+            SSHProxy.install()
         destination = "{}@{}".format(self.username, self.hostname)
         cmd = [
             "sshpass",
