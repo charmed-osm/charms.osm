@@ -31,4 +31,6 @@ setup(
         "Bug Reports": "https://github.com/charmed-osm/charms.osm/issues",
         "Source": "https://github.com/charmed-osm/charms.osm",
     },
+    packages=find_packages(include=("charms", "charms.*", "charms.osm.*")),
+    python_requires=">=3.5",
 )
