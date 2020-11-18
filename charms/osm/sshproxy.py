@@ -81,8 +81,8 @@ class SSHProxyCharm(CharmBase):
     state = StoredState()
     on = ProxyClusterEvents()
 
-    def __init__(self, framework, key):
-        super().__init__(framework, key)
+    def __init__(self, *args):
+        super().__init__(*args)
 
         self.peers = ProxyCluster(self, "proxypeer")
 
