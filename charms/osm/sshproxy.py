@@ -318,7 +318,6 @@ class SSHProxy:
             "-o",
             "StrictHostKeyChecking=no",
             "-q",
-            "-B",
         ]
         destination = "{}@{}:{}".format(self.username, self.hostname, destination_file)
         cmd.extend([source_file, destination])
