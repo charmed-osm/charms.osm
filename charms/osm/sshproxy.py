@@ -21,12 +21,14 @@
 
 import io
 import ipaddress
+from packaging import version
 import subprocess
 import os
 import socket
 import shlex
 import traceback
 import sys
+import yaml
 
 from shutil import which
 from subprocess import (
@@ -54,6 +56,41 @@ import logging
 
 
 logger = logging.getLogger(__name__)
+
+
+APT_MIRROR_SCRIPT = """
+#!/bin/bash
+set -e
+
+old_archive_mirror=$(awk "/^deb .* $(awk -F= '/DISTRIB_CODENAME=/ {{gsub(/"/,""); print $2}}' /etc/lsb-release) .*main.*\$/{{print \$2;exit}}" /etc/apt/sources.list)
+new_archive_mirror={}
+sed -i s,$old_archive_mirror,$new_archive_mirror, /etc/apt/sources.list
+old_prefix=/var/lib/apt/lists/$(echo $old_archive_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
+new_prefix=/var/lib/apt/lists/$(echo $new_archive_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
+[ "$old_prefix" != "$new_prefix" ] &&
+for old in ${{old_prefix}}_*; do
+    new=$(echo $old | sed s,^$old_prefix,$new_prefix,)
+    if [ -f $old ]; then
+      mv $old $new
+    fi
+done
+"""
+
+SECURITY_APT_MIRROR_SCRIPT = """
+old_security_mirror=$(awk "/^deb .* $(awk -F= '/DISTRIB_CODENAME=/ {{gsub(/"/,""); print $2}}' /etc/lsb-release)-security .*main.*\$/{{print \$2;exit}}" /etc/apt/sources.list)
+new_security_mirror={}
+sed -i s,$old_security_mirror,$new_security_mirror, /etc/apt/sources.list
+old_prefix=/var/lib/apt/lists/$(echo $old_security_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
+new_prefix=/var/lib/apt/lists/$(echo $new_security_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
+[ "$old_prefix" != "$new_prefix" ] &&
+for old in ${{old_prefix}}_*; do
+    new=$(echo $old | sed s,^$old_prefix,$new_prefix,)
+    if [ -f $old ]; then
+      mv $old $new
+    fi
+done
+"""
+
 
 class SSHKeysInitialized(EventBase):
     def __init__(self, handle, ssh_public_key, ssh_private_key):
@@ -87,12 +124,54 @@ class SSHProxyCharm(CharmBase):
         self.peers = ProxyCluster(self, "proxypeer")
 
         # SSH Proxy actions (primitives)
-        self.framework.observe(self.on.generate_ssh_key_action, self.on_generate_ssh_key_action)
-        self.framework.observe(self.on.get_ssh_public_key_action, self.on_get_ssh_public_key_action)
+        self.framework.observe(
+            self.on.generate_ssh_key_action, self.on_generate_ssh_key_action
+        )
+        self.framework.observe(
+            self.on.get_ssh_public_key_action, self.on_get_ssh_public_key_action
+        )
         self.framework.observe(self.on.run_action, self.on_run_action)
-        self.framework.observe(self.on.verify_ssh_credentials_action, self.on_verify_ssh_credentials_action)
+        self.framework.observe(
+            self.on.verify_ssh_credentials_action, self.on_verify_ssh_credentials_action
+        )
 
-        self.framework.observe(self.on.proxypeer_relation_changed, self.on_proxypeer_relation_changed)
+        self.framework.observe(
+            self.on.proxypeer_relation_changed, self.on_proxypeer_relation_changed
+        )
+
+        self.configure_mirrors()
+
+    def configure_mirrors(self):
+        juju_version = os.environ.get("JUJU_VERSION")
+        if version.parse(juju_version) < version.parse("2.9.4") and self.is_k8s_proxy_charm():
+            try:
+                if "apt-mirror" in self.config:
+                    subprocess.run(
+                        ["sh", "-c", APT_MIRROR_SCRIPT.format(self.config["apt-mirror"])],
+                        check=True,
+                    )
+                if "security-apt-mirror" in self.config:
+                    subprocess.run(
+                        [
+                            "sh",
+                            "-c",
+                            SECURITY_APT_MIRROR_SCRIPT.format(
+                                self.config["security-apt-mirror"]
+                            ),
+                        ],
+                        check=True,
+                    )
+            except CalledProcessError as e:
+                logger.error(f"Failed configuring mirrors. Stdout={e.stdout}, Stderr={e.stderr}")
+
+    def is_k8s_proxy_charm(self) -> bool:
+        """Check if charm is running on K8s"""
+        metadata_path = f'{os.environ["JUJU_CHARM_DIR"]}/metadata.yaml'
+        with open(metadata_path) as metadata_file:
+            metadata = yaml.safe_load(metadata_file.read())
+            return "containers" in metadata or "kubernetes" in metadata.get(
+                "series", []
+            )
 
     def get_ssh_proxy(self):
         """Get the SSHProxy instance"""
@@ -208,6 +287,7 @@ class LeadershipError(ModelError):
     def __init__(self):
         super().__init__("not leader")
 
+
 class SSHProxy:
     # The key will be stored in /var/lib/juju/agents, because for k8s operators that's a
     # persisten volume, which means that the keys will be there after reboot
@@ -235,7 +315,9 @@ class SSHProxy:
             os.mkdir(SSHProxy.keys_base_path)
         if not os.path.exists(SSHProxy.private_key_path):
             cmd = "ssh-keygen -t {} -b {} -N '' -f {}".format(
-                SSHProxy.key_type, SSHProxy.key_bits, SSHProxy.private_key_path,
+                SSHProxy.key_type,
+                SSHProxy.key_bits,
+                SSHProxy.private_key_path,
             )
 
             try:
@@ -347,12 +429,17 @@ class SSHProxy:
             destination,
         ]
         cmd.extend(command)
-        output = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return (output.stdout.decode("utf-8").strip(), output.stderr.decode("utf-8").strip())
+        output = subprocess.run(
+            cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        return (
+            output.stdout.decode("utf-8").strip(),
+            output.stderr.decode("utf-8").strip(),
+        )
 
     def verify_credentials(self):
         """Verify the SSH credentials.
-        
+
         :return (bool, str): Verified, Stderr
         """
         verified = False
