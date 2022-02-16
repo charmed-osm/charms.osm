@@ -26,7 +26,10 @@ setup(
     author="Canonical",
     author_email="david.garcia@canonical.com",
     keywords="charm, osm, development",
-    install_requires=[],
+    install_requires=[
+        "ops",
+        "packaging",
+    ],
     project_urls={
         "Bug Reports": "https://github.com/charmed-osm/charms.osm/issues",
         "Source": "https://github.com/charmed-osm/charms.osm",
