@@ -21,6 +21,7 @@
 
 import io
 import ipaddress
+from typing import List
 from packaging import version
 import subprocess
 import os
@@ -359,7 +360,7 @@ class SSHProxy:
     def has_ssh_key():
         return True if os.path.exists(SSHProxy.private_key_path) else False
 
-    def run(self, cmd: str) -> (str, str):
+    def run(self, cmd: str, ssh_options: List[str] = None) -> (str, str):
         """Run a command remotely via SSH.
 
         Note: The previous behavior was to run the command locally if SSH wasn't
@@ -368,6 +369,8 @@ class SSHProxy:
         """
         if isinstance(cmd, str):
             cmd = shlex.split(cmd)
+        if isinstance(ssh_options, str):
+            ssh_options = shlex.split(ssh_options)
 
         host = self._get_hostname()
         user = self.username
@@ -376,20 +379,23 @@ class SSHProxy:
 
         # Make sure we have everything we need to connect
         if host and user:
-            return self.ssh(cmd)
+            return self.ssh(cmd, ssh_options)
 
         raise Exception("Invalid SSH credentials.")
 
-    def scp(self, source_file, destination_file):
+    def scp(self, source_file, destination_file, ssh_options: List[str] = None):
         """Execute an scp command. Requires a fully qualified source and
         destination.
 
         :param str source_file: Path to the source file
         :param str destination_file: Path to the destination file
+        :param list(str) ssh_options: The options to pass to the SCP command
         :raises: :class:`CalledProcessError` if the command fails
         """
         if which("sshpass") is None:
             SSHProxy.install()
+        if ssh_options is None:
+            ssh_options = []
         cmd = [
             "sshpass",
             "-p",
@@ -398,6 +404,7 @@ class SSHProxy:
             "-i",
             os.path.expanduser(self.private_key_path),
             "-o",
+            *[p for opt in zip(['-o'] * len(ssh_options), ssh_options) for p in opt],
             "StrictHostKeyChecking=no",
             "-q",
         ]
@@ -405,16 +412,19 @@ class SSHProxy:
         cmd.extend([source_file, destination])
         subprocess.run(cmd, check=True)
 
-    def ssh(self, command):
+    def ssh(self, command, ssh_options: List[str] = None):
         """Run a command remotely via SSH.
 
         :param list(str) command: The command to execute
+        :param list(str) ssh_options: The options to pass to the SSH command
         :return: tuple: The stdout and stderr of the command execution
         :raises: :class:`CalledProcessError` if the command fails
         """
 
         if which("sshpass") is None:
             SSHProxy.install()
+        if ssh_options is None:
+            ssh_options = []
         destination = "{}@{}".format(self.username, self.hostname)
         cmd = [
             "sshpass",
@@ -425,6 +435,7 @@ class SSHProxy:
             os.path.expanduser(self.private_key_path),
             "-o",
             "StrictHostKeyChecking=no",
+            *[p for opt in zip(['-o']*len(ssh_options), ssh_options) for p in opt],
             "-q",
             destination,
         ]
