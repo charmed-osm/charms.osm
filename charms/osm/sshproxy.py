@@ -367,7 +367,7 @@ class SSHProxy:
         expect it not to.
         """
         if isinstance(cmd, str):
-            cmd = shlex.split(cmd)
+            cmd = shlex.split(cmd, posix=False)
 
         host = self._get_hostname()
         user = self.username
